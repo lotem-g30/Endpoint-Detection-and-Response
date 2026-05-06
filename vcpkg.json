@@ -1,6 +1,7 @@
 {
   "name": "argus",
   "version": "1.0.0",
+  "builtin-baseline": "b5fe03f690670829e507f12327c2c6ce756a613a",
   "description": "Argus EDR - Endpoint Detection and Response tool",
   "dependencies": [
     "cjson",

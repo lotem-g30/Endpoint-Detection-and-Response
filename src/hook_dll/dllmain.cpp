@@ -6,7 +6,7 @@
 #include "detours.h"
 
 #ifdef _M_X64
-#pragma comment(lib, "detoursx64.lib")
+//#pragma comment(lib, "detoursx64.lib")
 #endif
 
 // Hook MessageBoxA

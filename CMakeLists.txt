@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 project(argus C CXX)
-
+include_directories(include)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -12,7 +12,9 @@ find_package(cJSON CONFIG REQUIRED)
 # Uncomment above when YARA is installed via vcpkg
 
 # Shared include path (events.h visible to both targets)
-include_directories(include)
+find_path(DETOURS_INCLUDE_DIRS "detours/detours.h")
+find_library(DETOURS_LIBRARY detours REQUIRED)
+include_directories(${DETOURS_INCLUDE_DIRS} ${DETOURS_INCLUDE_DIRS}/detours)
 
 # ============================================================================
 # argus_hook - Shared Library (DLL)
@@ -45,8 +47,12 @@ if(EXISTS "${CMAKE_SOURCE_DIR}/Malware/HookChallengeSolution/detoursx64.lib")
     endif()
 else()
     # Try to find Detours via vcpkg
-    find_package(Detours CONFIG REQUIRED)
-    target_link_libraries(argus_hook PRIVATE Detours::Detours)
+    # find_package(Detours CONFIG REQUIRED)
+    # Find Detours headers and library (vcpkg style)
+    find_path(DETOURS_INCLUDE_DIRS "detours/detours.h")
+    find_library(DETOURS_LIBRARY detours REQUIRED)
+    include_directories(${DETOURS_INCLUDE_DIRS})
+    target_link_libraries(argus_hook PRIVATE cjson ${DETOURS_LIBRARY})
 endif()
 
 # ============================================================================
@@ -62,10 +68,15 @@ add_executable(argus_agent
     src/agent/yara_scanner.h
     src/agent/pesieve_scanner.cpp
     src/agent/pesieve_scanner.h
+    src/hook_dll/event_queue.c
+    src/hook_dll/event_queue.h
+    src/hook_dll/ipc_client.c
+    src/hook_dll/ipc_client.h
 )
 
 target_include_directories(argus_agent PRIVATE
     ${CMAKE_SOURCE_DIR}/src/agent
+    ${CMAKE_SOURCE_DIR}/src/hook_dll
 )
 
 # Link libraries for agent

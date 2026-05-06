@@ -1,8 +1,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <windows.h>
-#include "event_queue.h"
-#include "ipc_client.h"
+#include "../hook_dll/event_queue.h"
+#include "../hook_dll/ipc_client.h"
 #include "ipc_server.h"
 #include "scanner.h"
 #include "yara_scanner.h"
