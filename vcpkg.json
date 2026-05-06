@@ -1,0 +1,17 @@
+{
+  "name": "argus",
+  "version": "1.0.0",
+  "description": "Argus EDR - Endpoint Detection and Response tool",
+  "dependencies": [
+    "cjson",
+    "detours"
+  ],
+  "features": {
+    "yara": {
+      "description": "Enable YARA scanning support",
+      "dependencies": [
+        "yara"
+      ]
+    }
+  }
+}
