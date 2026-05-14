@@ -21,6 +21,8 @@ include_directories(${DETOURS_INCLUDE_DIRS} ${DETOURS_INCLUDE_DIRS}/detours)
 # ============================================================================
 add_library(argus_hook SHARED
     src/hook_dll/dllmain.cpp
+    src/hook_dll/hooks.c
+    src/hook_dll/hooks.h
     src/hook_dll/event_queue.c
     src/hook_dll/event_queue.h
     src/hook_dll/ipc_client.c
