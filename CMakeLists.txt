@@ -8,8 +8,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Find dependencies (via vcpkg)
 find_package(cJSON CONFIG REQUIRED)
-# find_package(unofficial-yara CONFIG REQUIRED)
-# Uncomment above when YARA is installed via vcpkg
+find_package(unofficial-libyara CONFIG)  # optional; enables YARA_AVAILABLE when installed
 
 # Shared include path (events.h visible to both targets)
 find_path(DETOURS_INCLUDE_DIRS "detours/detours.h")
@@ -70,15 +69,10 @@ add_executable(argus_agent
     src/agent/yara_scanner.h
     src/agent/pesieve_scanner.cpp
     src/agent/pesieve_scanner.h
-    src/hook_dll/event_queue.c
-    src/hook_dll/event_queue.h
-    src/hook_dll/ipc_client.c
-    src/hook_dll/ipc_client.h
 )
 
 target_include_directories(argus_agent PRIVATE
     ${CMAKE_SOURCE_DIR}/src/agent
-    ${CMAKE_SOURCE_DIR}/src/hook_dll
 )
 
 # Link libraries for agent
@@ -90,20 +84,31 @@ target_link_libraries(argus_agent PRIVATE
 
 # Optional: Add YARA support if available
 # Uncomment when YARA is installed via vcpkg
-# if(TARGET unofficial::yara)
-#     target_compile_definitions(argus_agent PRIVATE YARA_AVAILABLE)
-#     target_link_libraries(argus_agent PRIVATE unofficial::yara)
-# endif()
+if(TARGET unofficial::libyara::libyara)
+    target_compile_definitions(argus_agent PRIVATE YARA_AVAILABLE)
+    target_link_libraries(argus_agent PRIVATE unofficial::libyara::libyara)
+endif()
 
-# Set output directories
-set_target_properties(argus_hook argus_agent PROPERTIES
+# ============================================================================
+# injector - Classic DLL injector (Section 1.3)
+# ============================================================================
+add_executable(injector src/injector/main.c)
+
+# ============================================================================
+# test_target - End-to-end test harness (Section 6.3)
+# ============================================================================
+add_executable(test_target src/agent/test_target.c)
+target_include_directories(test_target PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
+# Set output directories (all binaries go to build/bin/<config>/)
+set_target_properties(argus_hook argus_agent injector test_target PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib
     ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib
 )
 
 # Installation rules
-install(TARGETS argus_hook argus_agent
+install(TARGETS argus_hook argus_agent test_target
     RUNTIME DESTINATION bin
     LIBRARY DESTINATION lib
     ARCHIVE DESTINATION lib
@@ -113,3 +118,9 @@ install(DIRECTORY include/argus
     DESTINATION include
     FILES_MATCHING PATTERN "*.h"
 )
+target_include_directories(argus_agent PRIVATE ${CMAKE_SOURCE_DIR}/pe-sieve/include)
+
+target_compile_definitions(argus_agent PRIVATE PESIEVE_AVAILABLE)
+
+target_link_libraries(argus_agent PRIVATE
+    ${CMAKE_SOURCE_DIR}/pe-sieve/build/Debug/pe-sieve.lib)
