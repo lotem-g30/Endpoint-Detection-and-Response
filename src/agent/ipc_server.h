@@ -5,7 +5,15 @@
 
 #define IPC_SERVER_MAX_INSTANCES 64
 
+typedef struct {
+    DWORD pid;
+} ScanTrigger;
+
 typedef struct ArgusIpcServer ArgusIpcServer;
 
 ArgusIpcServer* ipc_server_create(const char* session_id);
 void            ipc_server_destroy(ArgusIpcServer* s);
+
+// Blocks up to timeout_ms waiting for the next trigger.
+// Returns true and fills *out on success; false on timeout.
+bool ipc_server_dequeue_trigger(ArgusIpcServer* s, DWORD timeout_ms, ScanTrigger* out);

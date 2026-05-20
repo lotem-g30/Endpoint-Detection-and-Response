@@ -3,7 +3,7 @@
 #include <string.h>
 #include <stdlib.h>
 
-// Trigger APIs that cause a scan
+// APIs that cause the agent to enqueue a scan trigger
 static const char* TRIGGER_APIS[] = {
     "VirtualAllocEx",
     "CreateRemoteThread",
@@ -11,80 +11,165 @@ static const char* TRIGGER_APIS[] = {
     NULL
 };
 
-struct ArgusIpcServer {
-    char    session_id[ARGUS_MAX_UUID];
-    HANDLE  accept_thread;
-    volatile bool running;
-};
+// ── Trigger queue ─────────────────────────────────────────────────────────────
+
+#define TRIGGER_QUEUE_CAP 256
 
 typedef struct {
-    HANDLE pipe;
-    char   session_id[ARGUS_MAX_UUID];
+    ScanTrigger      buf[TRIGGER_QUEUE_CAP];
+    uint32_t         head;
+    uint32_t         tail;
+    CRITICAL_SECTION lock;
+    HANDLE           sem;   // semaphore: count == number of queued items
+} TriggerQueue;
+
+static void tq_init(TriggerQueue* q) {
+    memset(q->buf, 0, sizeof(q->buf));
+    q->head = q->tail = 0;
+    InitializeCriticalSection(&q->lock);
+    q->sem = CreateSemaphore(NULL, 0, TRIGGER_QUEUE_CAP, NULL);
+}
+
+static void tq_destroy(TriggerQueue* q) {
+    CloseHandle(q->sem);
+    DeleteCriticalSection(&q->lock);
+}
+
+static void tq_push(TriggerQueue* q, DWORD pid) {
+    EnterCriticalSection(&q->lock);
+    uint32_t next = (q->head + 1) % TRIGGER_QUEUE_CAP;
+    if (next != q->tail) {
+        q->buf[q->head].pid = pid;
+        q->head = next;
+        ReleaseSemaphore(q->sem, 1, NULL);
+    }
+    // silently drop if full
+    LeaveCriticalSection(&q->lock);
+}
+
+static bool tq_pop(TriggerQueue* q, DWORD timeout_ms, ScanTrigger* out) {
+    if (WaitForSingleObject(q->sem, timeout_ms) != WAIT_OBJECT_0)
+        return false;
+    EnterCriticalSection(&q->lock);
+    *out = q->buf[q->tail];
+    q->tail = (q->tail + 1) % TRIGGER_QUEUE_CAP;
+    LeaveCriticalSection(&q->lock);
+    return true;
+}
+
+// ── Server struct ─────────────────────────────────────────────────────────────
+
+struct ArgusIpcServer {
+    char         session_id[ARGUS_MAX_UUID];
+    HANDLE       accept_thread;
+    volatile bool running;
+    TriggerQueue  triggers;
+};
+
+// ── Per-client reader ─────────────────────────────────────────────────────────
+
+typedef struct {
+    HANDLE           pipe;
+    char             session_id[ARGUS_MAX_UUID];
+    ArgusIpcServer*  server;
 } ClientContext;
 
-static bool is_trigger_api(const char* api_name) {
-    for (int i = 0; TRIGGER_APIS[i] != NULL; i++) {
-        if (strcmp(api_name, TRIGGER_APIS[i]) == 0)
-            return true;
-    }
+static bool is_trigger_api(const char* name) {
+    for (int i = 0; TRIGGER_APIS[i]; i++)
+        if (strcmp(name, TRIGGER_APIS[i]) == 0) return true;
     return false;
+}
+
+// Extract the value of a JSON string field: "key":"value" → value (no cJSON dep)
+static bool json_get_string(const char* line, const char* key,
+                            char* out, size_t out_size) {
+    char search[128];
+    snprintf(search, sizeof(search), "\"%s\"", key);
+    const char* pos = strstr(line, search);
+    if (!pos) return false;
+    const char* colon = strchr(pos + strlen(search), ':');
+    if (!colon) return false;
+    const char* q1 = strchr(colon + 1, '"');
+    if (!q1) return false;
+    const char* q2 = strchr(q1 + 1, '"');
+    if (!q2) return false;
+    size_t len = (size_t)(q2 - q1 - 1);
+    if (len >= out_size) len = out_size - 1;
+    memcpy(out, q1 + 1, len);
+    out[len] = '\0';
+    return true;
+}
+
+// Extract the value of a JSON number field: "key":12345 → 12345
+static bool json_get_uint(const char* line, const char* key, DWORD* out) {
+    char search[128];
+    snprintf(search, sizeof(search), "\"%s\"", key);
+    const char* pos = strstr(line, search);
+    if (!pos) return false;
+    const char* colon = strchr(pos + strlen(search), ':');
+    if (!colon) return false;
+    // skip whitespace
+    const char* p = colon + 1;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p < '0' || *p > '9') return false;
+    *out = (DWORD)strtoul(p, NULL, 10);
+    return true;
 }
 
 static DWORD WINAPI client_reader_thread(LPVOID param) {
     ClientContext* ctx = (ClientContext*)param;
     HANDLE pipe = ctx->pipe;
 
-    char    accum[8192];
-    int     accum_pos = 0;
-    char    read_buf[4096];
-    DWORD   bytes_read;
+    char  accum[16384];
+    int   accum_pos = 0;
+    char  read_buf[4096];
+    DWORD bytes_read;
 
     while (1) {
         BOOL ok = ReadFile(pipe, read_buf, sizeof(read_buf) - 1, &bytes_read, NULL);
         if (!ok || bytes_read == 0) break;
 
-        // append to accumulation buffer
         if (accum_pos + (int)bytes_read >= (int)sizeof(accum)) {
-            // overflow � reset
-            accum_pos = 0;
+            accum_pos = 0;  // overflow: reset accumulator
             continue;
         }
         memcpy(accum + accum_pos, read_buf, bytes_read);
         accum_pos += bytes_read;
 
-        // scan for complete lines
         char* start = accum;
-        char* newline;
-        while ((newline = (char*)memchr(start, '\n',
-            accum_pos - (int)(start - accum))) != NULL) {
-            *newline = '\0';
+        char* nl;
+        while ((nl = (char*)memchr(start, '\n',
+                accum_pos - (int)(start - accum))) != NULL) {
+            *nl = '\0';
 
-            // we have a complete line in 'start'
-            printf("[SERVER] Received: %s\n", start);
+            // drop notice
+            char type_val[64] = {0};
+            if (json_get_string(start, "type", type_val, sizeof(type_val)) &&
+                strcmp(type_val, "drop_notice") == 0) {
+                DWORD dropped = 0;
+                json_get_uint(start, "dropped", &dropped);
+                printf("[IPC] drop_notice: %lu event(s) lost\n", dropped);
+                start = nl + 1;
+                continue;
+            }
 
-            // check for trigger API
-            // simple string search since we don't have cJSON yet
-            char* api_pos = strstr(start, "\"api\"");
-            if (api_pos) {
-                char* quote1 = strchr(api_pos + 6, '"');
-                if (quote1) {
-                    char* quote2 = strchr(quote1 + 1, '"');
-                    if (quote2) {
-                        char api_name[128] = { 0 };
-                        size_t len = quote2 - quote1 - 1;
-                        if (len < sizeof(api_name)) {
-                            memcpy(api_name, quote1 + 1, len);
-                            if (is_trigger_api(api_name))
-                                printf("[SERVER] TRIGGER detected: %s\n", api_name);
-                        }
+            // normal API event
+            char api[128] = {0};
+            if (json_get_string(start, "api", api, sizeof(api))) {
+                printf("[IPC] event: %s\n", start);
+                if (is_trigger_api(api)) {
+                    DWORD target_pid = 0;
+                    if (json_get_uint(start, "target_pid", &target_pid) && target_pid != 0) {
+                        printf("[IPC] TRIGGER: api=%s target_pid=%lu -> queuing scan\n",
+                               api, target_pid);
+                        tq_push(&ctx->server->triggers, target_pid);
                     }
                 }
             }
 
-            start = newline + 1;
+            start = nl + 1;
         }
 
-        // move leftover to front
         int remaining = accum_pos - (int)(start - accum);
         memmove(accum, start, remaining);
         accum_pos = remaining;
@@ -95,6 +180,8 @@ static DWORD WINAPI client_reader_thread(LPVOID param) {
     return 0;
 }
 
+// ── Accept loop ───────────────────────────────────────────────────────────────
+
 static DWORD WINAPI accept_loop_thread(LPVOID param) {
     ArgusIpcServer* s = (ArgusIpcServer*)param;
 
@@ -104,7 +191,7 @@ static DWORD WINAPI accept_loop_thread(LPVOID param) {
             PIPE_ACCESS_INBOUND,
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
             IPC_SERVER_MAX_INSTANCES,
-            4096, 4096,
+            4096, 16384,
             0, NULL
         );
         if (pipe == INVALID_HANDLE_VALUE) {
@@ -112,23 +199,27 @@ static DWORD WINAPI accept_loop_thread(LPVOID param) {
             continue;
         }
 
-        // block until a client connects
         BOOL connected = ConnectNamedPipe(pipe, NULL);
         if (!connected && GetLastError() != ERROR_PIPE_CONNECTED) {
             CloseHandle(pipe);
             continue;
         }
 
-        // spawn reader thread for this client
+        printf("[IPC] client connected\n");
+
         ClientContext* ctx = (ClientContext*)calloc(1, sizeof(ClientContext));
-        ctx->pipe = pipe;
+        ctx->pipe   = pipe;
+        ctx->server = s;
         strncpy(ctx->session_id, s->session_id, ARGUS_MAX_UUID - 1);
 
-        CreateThread(NULL, 0, client_reader_thread, ctx, 0, NULL);
+        HANDLE t = CreateThread(NULL, 0, client_reader_thread, ctx, 0, NULL);
+        if (t) CloseHandle(t);  // detach; thread frees ctx on exit
     }
 
     return 0;
 }
+
+// ── Public API ────────────────────────────────────────────────────────────────
 
 ArgusIpcServer* ipc_server_create(const char* session_id) {
     ArgusIpcServer* s = (ArgusIpcServer*)calloc(1, sizeof(ArgusIpcServer));
@@ -136,6 +227,7 @@ ArgusIpcServer* ipc_server_create(const char* session_id) {
 
     strncpy(s->session_id, session_id, ARGUS_MAX_UUID - 1);
     s->running = true;
+    tq_init(&s->triggers);
 
     s->accept_thread = CreateThread(NULL, 0, accept_loop_thread, s, 0, NULL);
     return s;
@@ -145,5 +237,10 @@ void ipc_server_destroy(ArgusIpcServer* s) {
     s->running = false;
     WaitForSingleObject(s->accept_thread, 3000);
     CloseHandle(s->accept_thread);
+    tq_destroy(&s->triggers);
     free(s);
+}
+
+bool ipc_server_dequeue_trigger(ArgusIpcServer* s, DWORD timeout_ms, ScanTrigger* out) {
+    return tq_pop(&s->triggers, timeout_ms, out);
 }

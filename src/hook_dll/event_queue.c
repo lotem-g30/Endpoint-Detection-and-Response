@@ -8,19 +8,19 @@ void eq_init(EventQueue* q) {
 }
 
 bool eq_push(EventQueue* q, const char* event) {
-    if (strlen(event) > EQ_MAX_EVENT_LEN) return false;
+    if (strlen(event) >= EQ_MAX_EVENT_LEN) return false;
 
     EnterCriticalSection(&q->lock);
 
     int next_head = (q->head + 1) % EQ_CAPACITY;
     if (next_head == q->tail) {
-        // Full — drop oldest
+        // Full - drop oldest
         q->tail = (q->tail + 1) % EQ_CAPACITY;
         q->dropped_count++;
     }
 
-    strncpy(q->slots[q->head], event, EQ_MAX_EVENT_LEN);
-    q->slots[q->head][EQ_MAX_EVENT_LEN] = '\0';
+    strncpy(q->slots[q->head], event, EQ_MAX_EVENT_LEN - 1);
+    q->slots[q->head][EQ_MAX_EVENT_LEN - 1] = '\0';
     q->head = next_head;
 
     LeaveCriticalSection(&q->lock);
@@ -49,6 +49,7 @@ uint32_t eq_count(EventQueue* q) {
     LeaveCriticalSection(&q->lock);
     return count;
 }
+
 uint64_t eq_dropped(EventQueue* q) {
     return q->dropped_count;
 }

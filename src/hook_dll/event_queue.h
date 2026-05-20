@@ -21,4 +21,3 @@ bool     eq_push(EventQueue* q, const char* event_json);
 bool     eq_pop(EventQueue* q, char* buf, size_t buf_len);
 uint32_t eq_count(EventQueue* q);
 uint64_t eq_dropped(EventQueue* q);
-uint32_t eq_count(EventQueue* q);

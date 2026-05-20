@@ -100,8 +100,20 @@ add_executable(injector src/injector/main.c)
 add_executable(test_target src/agent/test_target.c)
 target_include_directories(test_target PRIVATE ${CMAKE_SOURCE_DIR}/include)
 
+# ============================================================================
+# test_eq - EventQueue unit test (Section 6.5)
+# ============================================================================
+add_executable(test_eq
+    exercises/test_eq_standalone.c
+    src/hook_dll/event_queue.c
+)
+target_include_directories(test_eq PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/hook_dll
+    ${CMAKE_SOURCE_DIR}/include
+)
+
 # Set output directories (all binaries go to build/bin/<config>/)
-set_target_properties(argus_hook argus_agent injector test_target PROPERTIES
+set_target_properties(argus_hook argus_agent injector test_target test_eq PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib
     ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib
