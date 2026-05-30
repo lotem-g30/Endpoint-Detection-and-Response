@@ -8,6 +8,54 @@
 #include "correlator.h"
 #include "argus/events.h"
 
+static CRITICAL_SECTION g_output_lock;
+
+typedef struct {
+    DWORD        pid;
+    char         session_id[ARGUS_MAX_UUID];
+    ScanOptions* opts;
+} ScanWorkerContext;
+
+static DWORD WINAPI ScanWorkerThread(LPVOID param) {
+    ScanWorkerContext* ctx = (ScanWorkerContext*)param;
+
+    char         scan_id[ARGUS_MAX_UUID];
+    ScanFinding  findings[MAX_FINDINGS];
+    char         json_line[4096];
+    size_t       count = 0;
+
+    generate_uuid(scan_id, sizeof(scan_id));
+
+    EnterCriticalSection(&g_output_lock);
+    printf("[MAIN] scan triggered: pid=%lu scan_id=%s\n", ctx->pid, scan_id);
+    LeaveCriticalSection(&g_output_lock);
+
+    int r = scanner_run_pid(ctx->pid, ctx->session_id, scan_id,
+                            ctx->opts, findings, &count, MAX_FINDINGS);
+    if (r != 0) {
+        EnterCriticalSection(&g_output_lock);
+        printf("[MAIN] scan failed for pid %lu\n", ctx->pid);
+        LeaveCriticalSection(&g_output_lock);
+        free(ctx);
+        return 1;
+    }
+
+    EnterCriticalSection(&g_output_lock);
+    for (size_t i = 0; i < count; i++) {
+        scanner_serialize_finding(&findings[i], json_line, sizeof(json_line));
+        printf("%s\n", json_line);
+
+        // Route YARA matches to the correlator (→ CRITICAL escalation).
+        if (findings[i].finding_type == FINDING_YARA_MATCH)
+            correlator_feed_yara(ctx->pid, findings[i].detail.yara_rule);
+    }
+    fflush(stdout);
+    LeaveCriticalSection(&g_output_lock);
+
+    free(ctx);
+    return 0;
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     printf("=== ArgusAgent starting ===\n");
@@ -71,40 +119,36 @@ int main(void) {
     printf("[MAIN] Waiting for hook events (inject argus_hook.dll with injector.exe)...\n\n");
 
     // ── Scanner orchestrator loop ─────────────────────────────────────────────
-    // Triggered by hook events from the argus-events pipe.  Runs memory scan
-    // and YARA scan independently of PE-Sieve.
-    ScanFinding findings[MAX_FINDINGS];
-    char        scan_id[ARGUS_MAX_UUID];
-    char        json_line[4096];
+    // Each trigger is dispatched to a thread-pool worker so the main thread
+    // remains free to dequeue the next trigger immediately.
+    InitializeCriticalSection(&g_output_lock);
 
     while (1) {
         ScanTrigger trigger;
         if (!ipc_server_dequeue_trigger(server, 1000, &trigger))
             continue;
 
-        generate_uuid(scan_id, sizeof(scan_id));
-        printf("[MAIN] scan triggered: pid=%lu scan_id=%s\n", trigger.pid, scan_id);
-
-        size_t count = 0;
-        int r = scanner_run_pid(trigger.pid, session_id, scan_id,
-                                &opts, findings, &count, MAX_FINDINGS);
-        if (r != 0) {
-            printf("[MAIN] scan failed for pid %lu\n", trigger.pid);
+        ScanWorkerContext* ctx =
+            (ScanWorkerContext*)malloc(sizeof(ScanWorkerContext));
+        if (!ctx) {
+            fprintf(stderr, "[MAIN] OOM allocating worker context for pid %lu\n",
+                    trigger.pid);
             continue;
         }
+        ctx->pid  = trigger.pid;
+        ctx->opts = &opts;
+        strncpy(ctx->session_id, session_id, ARGUS_MAX_UUID - 1);
+        ctx->session_id[ARGUS_MAX_UUID - 1] = '\0';
 
-        for (size_t i = 0; i < count; i++) {
-            scanner_serialize_finding(&findings[i], json_line, sizeof(json_line));
-            printf("%s\n", json_line);
-
-            // Route YARA matches to the correlator (→ CRITICAL escalation).
-            if (findings[i].finding_type == FINDING_YARA_MATCH)
-                correlator_feed_yara(trigger.pid, findings[i].detail.yara_rule);
+        if (!QueueUserWorkItem(ScanWorkerThread, ctx, WT_EXECUTEDEFAULT)) {
+            fprintf(stderr, "[MAIN] QueueUserWorkItem failed for pid %lu (err=%lu)\n",
+                    trigger.pid, GetLastError());
+            free(ctx);
         }
-        fflush(stdout);
     }
 
     // Cleanup (unreachable without signal; included for correctness)
+    DeleteCriticalSection(&g_output_lock);
 #ifdef YARA_AVAILABLE
     if (rules) yr_rules_destroy(rules);
     yara_global_finalize();
