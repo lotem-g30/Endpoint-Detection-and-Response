@@ -77,7 +77,13 @@ static DWORD WINAPI pesieve_reader_thread(LPVOID param) {
                     ps_json_get_str(start, "finding_type",
                                     finding_type, sizeof(finding_type)) &&
                     pid != 0) {
-                    correlator_feed_pesieve(pid, finding_type);
+                    // Parse region.base_address ("0x..." hex string).
+                    ULONGLONG base_addr = 0;
+                    char base_addr_str[64] = {0};
+                    if (ps_json_get_str(start, "base_address",
+                                        base_addr_str, sizeof(base_addr_str)))
+                        base_addr = strtoull(base_addr_str, NULL, 16);
+                    correlator_feed_pesieve(pid, finding_type, base_addr);
                 }
             }
             start = nl + 1;

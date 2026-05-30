@@ -2,24 +2,36 @@
 #include <windows.h>
 #include "argus/events.h"
 
+#define CORRELATOR_MAX_REGIONS 16
+
+typedef struct {
+    ULONGLONG base_address;
+    ULONGLONG size;
+    char      source_api[32];
+} TrackedRegion;
+
 // Initialize the correlator. Call once from main() before any threads start.
 void correlator_init(void);
 
 // Tear down the correlator. Call once from main() at shutdown.
 void correlator_destroy(void);
 
-// Feed a PE-Sieve finding. finding_type_str is the string representation,
-// e.g. "FINDING_CODE_CAVE". Escalates the PID's severity to at least MEDIUM.
-void correlator_feed_pesieve(DWORD pid, const char* finding_type_str);
+// Feed a PE-Sieve finding. base_address is the region base from the JSON
+// "region":{"base_address":"0x..."} field.
+// Implements deduplication against previously hook-tracked regions before
+// escalating severity.
+void correlator_feed_pesieve(DWORD pid, const char* finding_type_str,
+                             ULONGLONG base_address);
 
 // Feed a hook event from the argus-events pipe.
 // api_name: e.g. "VirtualProtect", "CreateRemoteThread", "VirtualAllocEx".
 // protect_flags: flNewProtect for VirtualProtect; 0 for all other APIs.
-// Escalation rules:
-//   CreateRemoteThread  → CRITICAL (terminal injection action)
-//   VirtualProtect + exec bit set → raise by one tier
-//   All others          → at least MEDIUM
-void correlator_feed_hook_event(DWORD pid, const char* api_name, DWORD protect_flags);
+// address/size: the affected memory region (0 if not applicable).
+// For VirtualAllocEx, WriteProcessMemory, and VirtualProtect, the region is
+// recorded in the per-PID tracking table for later deduplication.
+void correlator_feed_hook_event(DWORD pid, const char* api_name,
+                                DWORD protect_flags,
+                                ULONGLONG address, ULONGLONG size);
 
 // Feed a YARA match. Escalates the PID's severity to CRITICAL immediately.
 void correlator_feed_yara(DWORD pid, const char* rule_name);

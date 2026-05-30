@@ -8,9 +8,11 @@
 static const char* s_sev[] = { "LOW", "MEDIUM", "HIGH", "CRITICAL" };
 
 typedef struct {
-    DWORD    pid;
-    Severity severity;
-    bool     active;
+    DWORD         pid;
+    Severity      severity;
+    bool          active;
+    int           region_count;
+    TrackedRegion regions[CORRELATOR_MAX_REGIONS];
 } PidEntry;
 
 static PidEntry          s_table[MAX_TRACKED_PIDS];
@@ -35,6 +37,7 @@ static PidEntry* find_or_create(DWORD pid) {
             free_slot = &s_table[i];
     }
     if (free_slot) {
+        memset(free_slot, 0, sizeof(*free_slot));
         free_slot->pid      = pid;
         free_slot->severity = SEVERITY_LOW;
         free_slot->active   = true;
@@ -69,27 +72,82 @@ static void emit_verdict(DWORD pid, Severity sev, const char* trigger) {
     fflush(stdout);
 }
 
-void correlator_feed_pesieve(DWORD pid, const char* finding_type_str) {
+void correlator_feed_pesieve(DWORD pid, const char* finding_type_str,
+                             ULONGLONG base_address)
+{
     char trigger[256];
     snprintf(trigger, sizeof(trigger), "PE-Sieve: %s",
              finding_type_str ? finding_type_str : "unknown");
 
-    bool     escalated = false;
-    Severity new_sev   = SEVERITY_MEDIUM;
+    // ── Deduplication matrix ──────────────────────────────────────────────────
+    bool is_structural =
+        finding_type_str &&
+        (strcmp(finding_type_str, "FINDING_PE_IMPLANT")      == 0 ||
+         strcmp(finding_type_str, "FINDING_PE_HOLLOWING")    == 0 ||
+         strcmp(finding_type_str, "FINDING_REFLECTIVE_LOAD") == 0);
+
+    bool is_local_mod =
+        finding_type_str &&
+        (strcmp(finding_type_str, "FINDING_CODE_CAVE")    == 0 ||
+         strcmp(finding_type_str, "FINDING_MODULE_STOMP") == 0);
+
+    bool     escalated   = false;
+    bool     deduped     = false;
+    Severity new_sev     = SEVERITY_MEDIUM;
+    char     dup_api[32] = {0};
 
     EnterCriticalSection(&s_lock);
     PidEntry* e = find_or_create(pid);
     if (e) {
-        escalated = set_at_least(e, SEVERITY_MEDIUM);
-        new_sev   = e->severity;
+        if (is_structural) {
+            // Structural findings (PE hollowing/implant/reflective load) are
+            // never deduplicated — they are always a higher-severity event.
+            escalated = set_at_least(e, SEVERITY_HIGH);
+            new_sev   = e->severity;
+        } else if (is_local_mod && base_address != 0) {
+            // Check whether this region was already captured by a hook event
+            // that we recorded.  Only VirtualProtect and WriteProcessMemory
+            // hooks describe inline patches — VirtualAllocEx only allocates.
+            for (int i = 0; i < e->region_count; i++) {
+                TrackedRegion* r = &e->regions[i];
+                if (base_address >= r->base_address &&
+                    base_address <  r->base_address + r->size &&
+                    (strcmp(r->source_api, "VirtualProtect")     == 0 ||
+                     strcmp(r->source_api, "WriteProcessMemory") == 0)) {
+                    deduped = true;
+                    strncpy(dup_api, r->source_api, sizeof(dup_api) - 1);
+                    break;
+                }
+            }
+            if (!deduped) {
+                escalated = set_at_least(e, SEVERITY_MEDIUM);
+                new_sev   = e->severity;
+            }
+        } else {
+            escalated = set_at_least(e, SEVERITY_MEDIUM);
+            new_sev   = e->severity;
+        }
     }
     LeaveCriticalSection(&s_lock);
+
+    if (deduped) {
+        printf("[CORRELATOR] Deduplicated PE-Sieve finding %s at 0x%llx "
+               "due to prior %s hook.\n",
+               finding_type_str,
+               (unsigned long long)base_address,
+               dup_api);
+        fflush(stdout);
+        return;
+    }
 
     if (escalated)
         emit_verdict(pid, new_sev, trigger);
 }
 
-void correlator_feed_hook_event(DWORD pid, const char* api_name, DWORD protect_flags) {
+void correlator_feed_hook_event(DWORD pid, const char* api_name,
+                                DWORD protect_flags,
+                                ULONGLONG address, ULONGLONG size)
+{
     if (!api_name) return;
 
     bool     escalated = false;
@@ -99,6 +157,23 @@ void correlator_feed_hook_event(DWORD pid, const char* api_name, DWORD protect_f
     EnterCriticalSection(&s_lock);
     PidEntry* e = find_or_create(pid);
     if (e) {
+        // Record the region so PE-Sieve findings at the same address can be
+        // deduplicated.  Only the APIs that describe a specific memory region
+        // are tracked; CreateRemoteThread has no meaningful base_address.
+        bool track =
+            address != 0 && size != 0 &&
+            (strcmp(api_name, "VirtualAllocEx")    == 0 ||
+             strcmp(api_name, "WriteProcessMemory") == 0 ||
+             strcmp(api_name, "VirtualProtect")     == 0);
+
+        if (track && e->region_count < CORRELATOR_MAX_REGIONS) {
+            TrackedRegion* r = &e->regions[e->region_count++];
+            r->base_address  = address;
+            r->size          = size;
+            strncpy(r->source_api, api_name, sizeof(r->source_api) - 1);
+        }
+
+        // Severity escalation (unchanged logic).
         if (strcmp(api_name, "CreateRemoteThread") == 0) {
             snprintf(trigger, sizeof(trigger), "Hook: CreateRemoteThread");
             escalated = set_at_least(e, SEVERITY_CRITICAL);
@@ -106,14 +181,12 @@ void correlator_feed_hook_event(DWORD pid, const char* api_name, DWORD protect_f
             snprintf(trigger, sizeof(trigger),
                      "Hook: VirtualProtect(protect=0x%lx)",
                      (unsigned long)protect_flags);
-            // Only escalate if the new protection includes an execute bit.
             bool is_exec = (protect_flags & (PAGE_EXECUTE | PAGE_EXECUTE_READ |
                                              PAGE_EXECUTE_READWRITE |
                                              PAGE_EXECUTE_WRITECOPY)) != 0;
             if (is_exec)
                 escalated = raise_by_one(e);
         } else {
-            // VirtualAllocEx, WriteProcessMemory, and any other hooked API.
             snprintf(trigger, sizeof(trigger), "Hook: %s", api_name);
             escalated = set_at_least(e, SEVERITY_MEDIUM);
         }

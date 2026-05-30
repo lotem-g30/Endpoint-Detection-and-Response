@@ -167,7 +167,18 @@ static DWORD WINAPI client_reader_thread(LPVOID param) {
                     DWORD protect = 0;
                     if (strcmp(api, "VirtualProtect") == 0)
                         json_get_uint(start, "protect", &protect);
-                    correlator_feed_hook_event(target_pid, api, protect);
+
+                    // Parse address (%p → bare hex) and size (decimal).
+                    ULONGLONG addr = 0;
+                    ULONGLONG sz   = 0;
+                    char addr_str[64] = {0};
+                    if (json_get_string(start, "address", addr_str, sizeof(addr_str)))
+                        addr = strtoull(addr_str, NULL, 16);
+                    DWORD sz_dw = 0;
+                    if (json_get_uint(start, "size", &sz_dw))
+                        sz = (ULONGLONG)sz_dw;
+
+                    correlator_feed_hook_event(target_pid, api, protect, addr, sz);
 
                     // Queue a full memory+YARA scan for high-signal APIs.
                     if (is_trigger_api(api)) {
