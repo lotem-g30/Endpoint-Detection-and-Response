@@ -1,6 +1,6 @@
 rule MZ_in_private_memory {
     meta:
-        description = "PE header found in private (non-image) memory — possible reflective load"
+        description = "PE header found in private (non-image) memory - possible reflective load"
     strings:
         $mz = { 4D 5A }
     condition:

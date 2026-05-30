@@ -2,15 +2,20 @@
 #include <stdlib.h>
 #include <windows.h>
 #include "ipc_server.h"
+#include "pesieve_server.h"
 #include "scanner.h"
 #include "yara_scanner.h"
+#include "correlator.h"
 #include "argus/events.h"
 
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     printf("=== ArgusAgent starting ===\n");
 
-    // ── YARA global init (must happen before yara_load_rules) ────────────────
+    // ── Correlator ────────────────────────────────────────────────────────────
+    correlator_init();
+
+    // ── YARA global init ──────────────────────────────────────────────────────
 #ifdef YARA_AVAILABLE
     yara_global_init();
 #endif
@@ -22,11 +27,24 @@ int main(void) {
     opts.yara_rules                = NULL;
 
 #ifdef YARA_AVAILABLE
+    // Load only Multi_EICAR.yar by absolute path so the agent finds rules
+    // regardless of the working directory it was launched from.
     YR_RULES* rules = NULL;
-    if (yara_load_rules("rules", &rules) == 0) {
+    char exe_path[MAX_PATH]   = {0};
+    char rules_path[MAX_PATH] = {0};
+    GetModuleFileNameA(NULL, exe_path, MAX_PATH);
+    char* last_sep = strrchr(exe_path, '\\');
+    if (last_sep) {
+        *last_sep = '\0';
+        snprintf(rules_path, sizeof(rules_path),
+                 "%s\\rules\\Multi_EICAR.yar", exe_path);
+    } else {
+        strncpy(rules_path, "rules\\Multi_EICAR.yar", sizeof(rules_path) - 1);
+    }
+    if (yara_load_rules(rules_path, &rules) == 0) {
         opts.yara_rules = rules;
     } else {
-        printf("[MAIN] Warning: no YARA rules loaded (rules/ missing or empty)\n");
+        printf("[MAIN] Warning: no YARA rules loaded from: %s\n", rules_path);
     }
 #endif
 
@@ -39,10 +57,22 @@ int main(void) {
         return 1;
     }
     printf("[MAIN] IPC server listening on \\\\.\\pipe\\argus-events\n");
+
+    // ── PE-Sieve DLL server ───────────────────────────────────────────────────
+    ArgusPesieveServer* pesieve_srv = pesieve_server_create();
+    if (!pesieve_srv) {
+        fprintf(stderr, "[MAIN] Failed to create PE-Sieve server\n");
+        ipc_server_destroy(server);
+        return 1;
+    }
+    printf("[MAIN] PE-Sieve server listening on \\\\.\\pipe\\argus-pesieve\n");
+
     printf("[MAIN] session_id = %s\n", session_id);
     printf("[MAIN] Waiting for hook events (inject argus_hook.dll with injector.exe)...\n\n");
 
     // ── Scanner orchestrator loop ─────────────────────────────────────────────
+    // Triggered by hook events from the argus-events pipe.  Runs memory scan
+    // and YARA scan independently of PE-Sieve.
     ScanFinding findings[MAX_FINDINGS];
     char        scan_id[ARGUS_MAX_UUID];
     char        json_line[4096];
@@ -66,6 +96,10 @@ int main(void) {
         for (size_t i = 0; i < count; i++) {
             scanner_serialize_finding(&findings[i], json_line, sizeof(json_line));
             printf("%s\n", json_line);
+
+            // Route YARA matches to the correlator (→ CRITICAL escalation).
+            if (findings[i].finding_type == FINDING_YARA_MATCH)
+                correlator_feed_yara(trigger.pid, findings[i].detail.yara_rule);
         }
         fflush(stdout);
     }
@@ -75,6 +109,8 @@ int main(void) {
     if (rules) yr_rules_destroy(rules);
     yara_global_finalize();
 #endif
+    correlator_destroy();
+    pesieve_server_destroy(pesieve_srv);
     ipc_server_destroy(server);
     return 0;
 }

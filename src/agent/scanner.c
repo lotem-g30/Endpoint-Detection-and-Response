@@ -1,5 +1,4 @@
 #include "scanner.h"
-#include "pesieve_scanner.h"
 #include "yara_scanner.h"
 #include <stdio.h>
 #include <string.h>
@@ -126,13 +125,6 @@ int scanner_run_pid(DWORD pid,
             printf("[SCANNER] yara_scan_process failed for pid %lu\n", pid);
     }
 #endif
-
-    if (opts->detect_pe_anomalies) {
-        int r = pesieve_scan(pid, process_name, session_id, scan_id,
-                             out_findings, out_count, max_findings);
-        if (r != 0)
-            printf("[SCANNER] pesieve_scan failed for pid %lu\n", pid);
-    }
 
     CloseHandle(hProc);
     printf("[SCANNER] pid %lu -> %zu finding(s)\n", pid, *out_count);

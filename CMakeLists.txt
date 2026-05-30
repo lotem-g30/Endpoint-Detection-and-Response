@@ -63,12 +63,14 @@ add_executable(argus_agent
     src/agent/main.c
     src/agent/ipc_server.c
     src/agent/ipc_server.h
+    src/agent/pesieve_server.c
+    src/agent/pesieve_server.h
     src/agent/scanner.c
     src/agent/scanner.h
     src/agent/yara_scanner.c
     src/agent/yara_scanner.h
-    src/agent/pesieve_scanner.cpp
-    src/agent/pesieve_scanner.h
+    src/agent/correlator.c
+    src/agent/correlator.h
 )
 
 target_include_directories(argus_agent PRIVATE
@@ -130,9 +132,39 @@ install(DIRECTORY include/argus
     DESTINATION include
     FILES_MATCHING PATTERN "*.h"
 )
-target_include_directories(argus_agent PRIVATE ${CMAKE_SOURCE_DIR}/pe-sieve/include)
 
-target_compile_definitions(argus_agent PRIVATE PESIEVE_AVAILABLE)
+# ============================================================================
+# argus_pesieve - Injected DLL that runs PE-Sieve in-process and reports
+#                 findings back to argus_agent via \\.\pipe\argus-pesieve
+# ============================================================================
+add_library(argus_pesieve SHARED
+    src/pesieve_dll/dllmain.cpp
+)
 
-target_link_libraries(argus_agent PRIVATE
-    ${CMAKE_SOURCE_DIR}/pe-sieve/build/Debug/pe-sieve.lib)
+target_include_directories(argus_pesieve PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/pe-sieve/include
+)
+
+target_link_libraries(argus_pesieve PRIVATE
+    ${CMAKE_SOURCE_DIR}/pe-sieve/build/Debug/pe-sieve.lib
+    cjson
+    rpcrt4
+)
+
+set_target_properties(argus_pesieve PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib
+    ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib
+)
+
+# ============================================================================
+# Copy the rules/ directory (YARA rules + PE-Sieve pattern file) next to the
+# agent and DLL after every build so both can resolve rules at runtime.
+# ============================================================================
+add_custom_command(TARGET argus_agent POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_SOURCE_DIR}/rules
+        $<TARGET_FILE_DIR:argus_agent>/rules
+    COMMENT "Syncing rules/ to $<TARGET_FILE_DIR:argus_agent>/rules"
+)

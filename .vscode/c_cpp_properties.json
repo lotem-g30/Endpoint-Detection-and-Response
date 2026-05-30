@@ -6,6 +6,7 @@
                 "${workspaceFolder}/include",
                 "${workspaceFolder}/src/hook_dll",
                 "${workspaceFolder}/src/agent",
+                "${workspaceFolder}/pe-sieve/include",
                 "${workspaceFolder}/build/vcpkg_installed/x64-windows/include",
                 "${workspaceFolder}/build/vcpkg_installed/x64-windows/include/detours",
                 "C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.44.35207/include",

@@ -1,13 +1,15 @@
 #include "ipc_server.h"
+#include "correlator.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 
-// APIs that cause the agent to enqueue a scan trigger
+// APIs that additionally trigger a full memory + YARA scan of the target.
 static const char* TRIGGER_APIS[] = {
     "VirtualAllocEx",
     "CreateRemoteThread",
     "WriteProcessMemory",
+    "VirtualProtect",
     NULL
 };
 
@@ -80,7 +82,7 @@ static bool is_trigger_api(const char* name) {
     return false;
 }
 
-// Extract the value of a JSON string field: "key":"value" → value (no cJSON dep)
+// Extract the value of a JSON string field: "key":"value" → value
 static bool json_get_string(const char* line, const char* key,
                             char* out, size_t out_size) {
     char search[128];
@@ -108,7 +110,6 @@ static bool json_get_uint(const char* line, const char* key, DWORD* out) {
     if (!pos) return false;
     const char* colon = strchr(pos + strlen(search), ':');
     if (!colon) return false;
-    // skip whitespace
     const char* p = colon + 1;
     while (*p == ' ' || *p == '\t') p++;
     if (*p < '0' || *p > '9') return false;
@@ -157,9 +158,19 @@ static DWORD WINAPI client_reader_thread(LPVOID param) {
             char api[128] = {0};
             if (json_get_string(start, "api", api, sizeof(api))) {
                 printf("[IPC] event: %s\n", start);
-                if (is_trigger_api(api)) {
-                    DWORD target_pid = 0;
-                    if (json_get_uint(start, "target_pid", &target_pid) && target_pid != 0) {
+
+                DWORD target_pid = 0;
+                json_get_uint(start, "target_pid", &target_pid);
+
+                if (target_pid != 0) {
+                    // Feed every hook event into the correlator.
+                    DWORD protect = 0;
+                    if (strcmp(api, "VirtualProtect") == 0)
+                        json_get_uint(start, "protect", &protect);
+                    correlator_feed_hook_event(target_pid, api, protect);
+
+                    // Queue a full memory+YARA scan for high-signal APIs.
+                    if (is_trigger_api(api)) {
                         printf("[IPC] TRIGGER: api=%s target_pid=%lu -> queuing scan\n",
                                api, target_pid);
                         tq_push(&ctx->server->triggers, target_pid);

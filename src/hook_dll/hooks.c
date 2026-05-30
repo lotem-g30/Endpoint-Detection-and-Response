@@ -77,6 +77,27 @@ static HANDLE WINAPI Hook_CreateRemoteThread(
     return result;
 }
 
+// ── VirtualProtect ────────────────────────────────────────────────────────────
+
+static BOOL (WINAPI *Real_VirtualProtect)(LPVOID, SIZE_T, DWORD, PDWORD)
+    = VirtualProtect;
+
+static BOOL WINAPI Hook_VirtualProtect(
+    LPVOID lpAddress, SIZE_T dwSize, DWORD flNewProtect, PDWORD lpflOldProtect)
+{
+    BOOL result = Real_VirtualProtect(lpAddress, dwSize, flNewProtect, lpflOldProtect);
+
+    char event[512];
+    snprintf(event, sizeof(event),
+        "{\"api\":\"VirtualProtect\",\"pid\":%lu,\"target_pid\":%lu,"
+        "\"address\":\"%p\",\"size\":%zu,\"protect\":%lu}",
+        GetCurrentProcessId(), GetCurrentProcessId(),
+        lpAddress, (size_t)dwSize, (unsigned long)flNewProtect);
+    eq_push(&g_queue, event);
+
+    return result;
+}
+
 // ── Transaction helpers ───────────────────────────────────────────────────────
 
 void hooks_install(void) {
@@ -85,6 +106,7 @@ void hooks_install(void) {
     DetourAttach((PVOID *)&Real_VirtualAllocEx,    Hook_VirtualAllocEx);
     DetourAttach((PVOID *)&Real_WriteProcessMemory, Hook_WriteProcessMemory);
     DetourAttach((PVOID *)&Real_CreateRemoteThread, Hook_CreateRemoteThread);
+    DetourAttach((PVOID *)&Real_VirtualProtect,     Hook_VirtualProtect);
     DetourTransactionCommit();
 }
 
@@ -94,5 +116,6 @@ void hooks_uninstall(void) {
     DetourDetach((PVOID *)&Real_VirtualAllocEx,    Hook_VirtualAllocEx);
     DetourDetach((PVOID *)&Real_WriteProcessMemory, Hook_WriteProcessMemory);
     DetourDetach((PVOID *)&Real_CreateRemoteThread, Hook_CreateRemoteThread);
+    DetourDetach((PVOID *)&Real_VirtualProtect,     Hook_VirtualProtect);
     DetourTransactionCommit();
 }
