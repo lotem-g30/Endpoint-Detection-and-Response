@@ -99,8 +99,13 @@ add_executable(injector src/injector/main.c)
 # ============================================================================
 # test_target - End-to-end test harness (Section 6.3)
 # ============================================================================
-add_executable(test_target src/agent/test_target.c)
+add_executable(test_target src/test_target/main.c)
 target_include_directories(test_target PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
+# ============================================================================
+# dummy_malware - Synthetic RWX shellcode target for PE-Sieve E2E tests
+# ============================================================================
+add_executable(dummy_malware src/agent/dummy_malware.c)
 
 # ============================================================================
 # test_eq - EventQueue unit test (Section 6.5)
@@ -114,8 +119,21 @@ target_include_directories(test_eq PRIVATE
     ${CMAKE_SOURCE_DIR}/include
 )
 
+# ============================================================================
+# test_pesieve_correlator - Integration test for correlator_feed_pesieve()
+# ============================================================================
+add_executable(test_pesieve_correlator
+    exercises/test_pesieve_correlator.c
+    src/agent/correlator.c
+)
+target_include_directories(test_pesieve_correlator PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/agent
+    ${CMAKE_SOURCE_DIR}/include
+)
+
 # Set output directories (all binaries go to build/bin/<config>/)
-set_target_properties(argus_hook argus_agent injector test_target test_eq PROPERTIES
+set_target_properties(argus_hook argus_agent injector test_target test_eq
+                      test_pesieve_correlator dummy_malware PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib
     ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib

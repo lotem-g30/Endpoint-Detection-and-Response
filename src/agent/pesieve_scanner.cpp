@@ -1,13 +1,13 @@
 #include "pesieve_scanner.h"
 #include <string.h>
-#include <time.h> // Required for generating the ISO-8601 timestamp
+#include <time.h>
 
 #ifdef PESIEVE_AVAILABLE
-#include <pe_sieve_api.h> // Corrected header name
+#include <pe_sieve_api.h>
+#include <vector>
 #endif
 
-// Helper function to generate the ISO-8601 timestamp required by the guide
-void get_current_timestamp(char* buf, size_t max_len) {
+static void get_current_timestamp(char* buf, size_t max_len) {
     time_t now = time(NULL);
     struct tm t;
     gmtime_s(&t, &now);
@@ -23,54 +23,65 @@ extern "C" int pesieve_scan(DWORD pid,
     size_t max_findings)
 {
 #ifndef PESIEVE_AVAILABLE
-    // Library not available at build time
     return -1;
-#define OUT_NO_DIR 1
 #else
     pesieve::t_params params = {};
-    params.pid = pid;
-    params.out_filter = pesieve::OUT_NO_DIR;
-    params.quiet = true;   // Suppress console noise
+    params.pid            = pid;
+    params.out_filter     = pesieve::OUT_NO_DIR;
+    params.quiet          = true;
+    // SHELLC_PATTERNS_OR_STATS enables the working-set walker so PE-Sieve
+    // visits private executable regions and can detect shellcode patterns /
+    // high-entropy payloads beyond what the PEB module scan covers.
+    params.shellcode      = pesieve::SHELLC_PATTERNS_OR_STATS;
+    params.json_lvl       = pesieve::JSON_DETAILS;
+    params.results_filter = pesieve::SHOW_SUSPICIOUS;
 
-    // Execute scan using the standard API discovered by Claude
-    pesieve::t_report report = PESieve_scan(&params);
+    // Two-pass scan: allocate 64 KB initially, resize if PE-Sieve signals
+    // truncation via the needed_size output parameter.
+    std::vector<char> json_buf(65536, '\0');
+    size_t needed = 0;
 
-    // Check if we have reached the maximum allowed findings
-    if (*out_count >= max_findings) return 0;
+    pesieve::t_report report = PESieve_scan_ex(
+        &params, pesieve::REPORT_SCANNED,
+        json_buf.data(), json_buf.size(), &needed);
 
-    // Map aggregate counts to ScanFinding entries if anomalies are detected
-    if (report.replaced > 0 || report.implanted_pe > 0 || report.implanted_shc > 0 || report.patched > 0) {
+    if (needed > json_buf.size()) {
+        json_buf.assign(needed + 1, '\0');
+        report = PESieve_scan_ex(
+            &params, pesieve::REPORT_SCANNED,
+            json_buf.data(), json_buf.size(), &needed);
+    }
+
+    // Helper lambda: append one ScanFinding to the output array.
+    auto add_finding = [&](FindingType ft, const char* anomaly) -> bool {
+        if (*out_count >= max_findings) return false;
         ScanFinding* f = &out_findings[*out_count];
         memset(f, 0, sizeof(*f));
-
-        // 1. Populate general identifiers and timestamp
         get_current_timestamp(f->ts, sizeof(f->ts));
-        strncpy(f->session_id, session_id, ARGUS_MAX_UUID - 1);
-        strncpy(f->scan_id, scan_id, ARGUS_MAX_UUID - 1);
-        strncpy(f->process_name, process_name, ARGUS_MAX_NAME - 1);
-        f->pid = pid;
-        f->severity = SEVERITY_HIGH;
-
-        // 2. Populate memory region status
+        strncpy(f->session_id,    session_id,    ARGUS_MAX_UUID - 1);
+        strncpy(f->scan_id,       scan_id,       ARGUS_MAX_UUID - 1);
+        strncpy(f->process_name,  process_name,  ARGUS_MAX_NAME - 1);
+        f->pid          = pid;
+        f->finding_type = ft;
+        f->severity     = SEVERITY_HIGH;
         f->region.state = MEM_COMMIT;
-
-        // 3. Map the specific anomaly type
-        if (report.replaced > 0) {
-            f->finding_type = FINDING_PE_HOLLOWING;
-            strncpy(f->detail.pe_anomaly, "PE hollowing detected", sizeof(f->detail.pe_anomaly) - 1);
-        }
-        else if (report.implanted_pe > 0 || report.implanted_shc > 0) {
-            f->finding_type = FINDING_PE_IMPLANT;
-            strncpy(f->detail.pe_anomaly, "PE implant detected", sizeof(f->detail.pe_anomaly) - 1);
-        }
-        else if (report.patched > 0) {
-            f->finding_type = FINDING_CODE_CAVE;
-            strncpy(f->detail.pe_anomaly, "Code cave/modification detected", sizeof(f->detail.pe_anomaly) - 1);
-        }
-
-        strncpy(f->detail.reason, f->detail.pe_anomaly, sizeof(f->detail.reason) - 1);
+        strncpy(f->detail.pe_anomaly, anomaly, sizeof(f->detail.pe_anomaly) - 1);
+        strncpy(f->detail.reason,     anomaly, sizeof(f->detail.reason)     - 1);
         (*out_count)++;
-    }
+        return true;
+    };
+
+    if (report.replaced > 0)
+        add_finding(FINDING_PE_HOLLOWING, "PE hollowing detected");
+
+    if (report.implanted_pe > 0 || report.implanted_shc > 0)
+        add_finding(FINDING_PE_IMPLANT, "PE implant detected");
+
+    if (report.patched > 0)
+        add_finding(FINDING_CODE_CAVE, "Code cave/modification detected");
+
+    if (report.iat_hooked > 0)
+        add_finding(FINDING_MODULE_STOMP, "IAT hook detected");
 
     return 0;
 #endif

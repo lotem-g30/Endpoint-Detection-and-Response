@@ -198,6 +198,16 @@ int yara_scan_process(HANDLE      hProcess,
         if (mbi.Protect & PAGE_GUARD)
             continue;
 
+        // Only scan pages with execute permission.  Shellcode must be
+        // runnable before it is operationally relevant, and restricting
+        // YARA to executable pages makes the FSM escalation ladder strictly
+        // ordered: WriteProcessMemory fires MEDIUM (RW page, no YARA match)
+        // and VirtualProtect fires HIGH, then the triggered scan finds the
+        // EICAR payload in the now-executable page and fires CRITICAL.
+        if (!(base_protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ |
+                              PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)))
+            continue;
+
         // Skip oversized regions to cap memory usage
         if (mbi.RegionSize > MAX_REGION_SIZE) {
             printf("[YARA] Skipping large region 0x%p (%zu MB)\n",

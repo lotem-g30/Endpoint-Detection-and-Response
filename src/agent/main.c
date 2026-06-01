@@ -75,7 +75,7 @@ int main(void) {
     opts.yara_rules                = NULL;
 
 #ifdef YARA_AVAILABLE
-    // Load only Multi_EICAR.yar by absolute path so the agent finds rules
+    // Load Multi_EICAR.yar by absolute path so the agent finds rules
     // regardless of the working directory it was launched from.
     YR_RULES* rules = NULL;
     char exe_path[MAX_PATH]   = {0};

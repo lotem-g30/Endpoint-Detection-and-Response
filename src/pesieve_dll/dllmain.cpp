@@ -92,34 +92,54 @@ static HANDLE connect_to_pipe(void) {
             L"\\\\.\\pipe\\argus-pesieve",
             GENERIC_WRITE, 0, NULL,
             OPEN_EXISTING, 0, NULL);
-        if (h != INVALID_HANDLE_VALUE) return h;
+        if (h != INVALID_HANDLE_VALUE) {
+            printf("[DEBUG] DLL: pipe argus-pesieve connected OK\n");
+            fflush(stdout);
+            return h;
+        }
         DWORD err = GetLastError();
-        if (err != ERROR_PIPE_BUSY && err != ERROR_FILE_NOT_FOUND)
+        if (err != ERROR_PIPE_BUSY && err != ERROR_FILE_NOT_FOUND) {
+            printf("[DEBUG] DLL: pipe connect hard-fail err=%lu\n", (unsigned long)err);
+            fflush(stdout);
             return INVALID_HANDLE_VALUE;
-        if ((GetTickCount() - start) >= 3000)
+        }
+        if ((GetTickCount() - start) >= 3000) {
+            printf("[DEBUG] DLL: pipe argus-pesieve connect TIMEOUT (3s) — agent server not ready?\n");
+            fflush(stdout);
             return INVALID_HANDLE_VALUE;
+        }
         Sleep(100);
     }
 }
 
-static void emit_finding(HANDLE pipe,
-                         DWORD self_pid,
-                         const char* process_name,
-                         const char* session_id,
-                         const char* scan_id,
-                         FindingType ft,
-                         const char* anomaly)
+// Emit a finding with fully-populated region fields.
+// base_address, region_size, and protect may be 0 for PE-Sieve aggregate
+// findings where individual region addresses are not available.
+static void emit_finding_at(HANDLE pipe,
+                             DWORD self_pid,
+                             const char* process_name,
+                             const char* session_id,
+                             const char* scan_id,
+                             FindingType ft,
+                             ULONGLONG base_address,
+                             ULONGLONG region_size,
+                             DWORD protect,
+                             const char* anomaly)
 {
     ScanFinding f;
     memset(&f, 0, sizeof(f));
     get_timestamp(f.ts, sizeof(f.ts));
-    strncpy(f.session_id,    session_id,    ARGUS_MAX_UUID - 1);
-    strncpy(f.scan_id,       scan_id,       ARGUS_MAX_UUID - 1);
-    strncpy(f.process_name,  process_name,  ARGUS_MAX_NAME - 1);
-    f.pid          = self_pid;
-    f.finding_type = ft;
-    f.severity     = SEVERITY_HIGH;
-    f.region.state = MEM_COMMIT;
+    strncpy(f.session_id,   session_id,   ARGUS_MAX_UUID - 1);
+    strncpy(f.scan_id,      scan_id,      ARGUS_MAX_UUID - 1);
+    strncpy(f.process_name, process_name, ARGUS_MAX_NAME - 1);
+    f.pid                 = self_pid;
+    f.finding_type        = ft;
+    f.severity            = SEVERITY_HIGH;
+    f.region.base_address = base_address;
+    f.region.size         = region_size;
+    f.region.protect      = protect;
+    f.region.type         = (protect != 0) ? MEM_PRIVATE : 0;
+    f.region.state        = MEM_COMMIT;
     strncpy(f.detail.pe_anomaly, anomaly, sizeof(f.detail.pe_anomaly) - 1);
     strncpy(f.detail.reason,     anomaly, sizeof(f.detail.reason)     - 1);
 
@@ -129,8 +149,27 @@ static void emit_finding(HANDLE pipe,
     buf[len]     = '\n';
     buf[len + 1] = '\0';
 
-    DWORD written;
-    WriteFile(pipe, buf, (DWORD)(len + 1), &written, NULL);
+    printf("[DEBUG] DLL: sending %zu bytes to pipe argus-pesieve\n", len + 1);
+    fflush(stdout);
+    DWORD written = 0;
+    BOOL ok = WriteFile(pipe, buf, (DWORD)(len + 1), &written, NULL);
+    printf("[DEBUG] DLL: WriteFile ok=%d written=%lu err=%lu\n",
+           (int)ok, (unsigned long)written,
+           ok ? 0UL : (unsigned long)GetLastError());
+    fflush(stdout);
+}
+
+// Convenience wrapper for PE-Sieve aggregate findings (no specific region).
+static void emit_finding(HANDLE pipe,
+                         DWORD self_pid,
+                         const char* process_name,
+                         const char* session_id,
+                         const char* scan_id,
+                         FindingType ft,
+                         const char* anomaly)
+{
+    emit_finding_at(pipe, self_pid, process_name, session_id, scan_id,
+                    ft, 0, 0, 0, anomaly);
 }
 
 // ── Patch whitelist helpers ───────────────────────────────────────────────────
@@ -256,6 +295,55 @@ static bool has_foreign_patches(const char* json, ULONGLONG hook_dll_base) {
     return !any_inspected;
 }
 
+// ── Private RWX region walker ─────────────────────────────────────────────────
+//
+// Supplements the PE-Sieve scan with a direct VirtualQuery() walk of the
+// current process's address space.  Emits FINDING_PRIVATE_EXECUTABLE for
+// every committed private region whose protection includes both write and
+// execute bits (PAGE_EXECUTE_READWRITE or PAGE_EXECUTE_WRITECOPY).
+//
+// PE-Sieve's aggregate counters (implanted_pe, implanted_shc) do not reliably
+// flag such regions in version 0.4.1 when the content has low entropy or when
+// the minimal PE header does not pass full structural validation.  This walker
+// is the authoritative detector for FINDING_PRIVATE_EXECUTABLE.
+static void walk_private_rwx(HANDLE pipe,
+                              DWORD self_pid,
+                              const char* process_name,
+                              const char* session_id,
+                              const char* scan_id)
+{
+    unsigned char* addr = NULL;
+    MEMORY_BASIC_INFORMATION mbi;
+
+    while (VirtualQuery(addr, &mbi, sizeof(mbi)) == sizeof(mbi)) {
+        addr += mbi.RegionSize;
+
+        if (mbi.State != MEM_COMMIT || mbi.Type != MEM_PRIVATE)
+            continue;
+
+        printf("[DEBUG] DLL: Checking region %p, Protect: %d\n",
+               mbi.BaseAddress, (int)mbi.Protect);
+        fflush(stdout);
+
+        // Strip modifier flags (PAGE_GUARD etc.) before testing execute+write.
+        DWORD prot = mbi.Protect & ~(PAGE_GUARD | PAGE_NOCACHE | PAGE_WRITECOMBINE);
+        if (prot != PAGE_EXECUTE_READWRITE && prot != PAGE_EXECUTE_WRITECOPY)
+            continue;
+
+        printf("[DEBUG] DLL: FOUND SUSPICIOUS RWX at %p!\n", mbi.BaseAddress);
+        fflush(stdout);
+
+        // emit_finding_at IS the IPC send — it serialises the finding to JSON
+        // and calls WriteFile on the argus-pesieve pipe handle.
+        emit_finding_at(pipe, self_pid, process_name, session_id, scan_id,
+                        FINDING_PRIVATE_EXECUTABLE,
+                        (ULONGLONG)(uintptr_t)mbi.BaseAddress,
+                        (ULONGLONG)mbi.RegionSize,
+                        mbi.Protect,
+                        "Private writable+executable memory region");
+    }
+}
+
 // ── Scan thread ───────────────────────────────────────────────────────────────
 
 // Single background thread: scans immediately on start, then every 2 minutes.
@@ -274,13 +362,15 @@ static DWORD WINAPI scan_thread(LPVOID /*param*/) {
     }
 
     while (1) {
+        printf("[DEBUG] DLL: scan cycle starting (pid=%lu)\n", (unsigned long)self_pid);
+        fflush(stdout);
         char scan_id[ARGUS_MAX_UUID];
         gen_uuid(scan_id, sizeof(scan_id));
 
         // ── Layer 1: pre-scan module exclusion ───────────────────────────────
         // Record the hook DLL's base address before the scan so the result
         // cannot change between the check and the comparison below.
-        HMODULE hook_dll      = GetModuleHandleA("argus_hook.dll");
+        HMODULE hook_dll        = GetModuleHandleA("argus_hook.dll");
         ULONGLONG hook_dll_base = (ULONGLONG)hook_dll;
 
         // Tell PE-Sieve to skip our own injected modules entirely, preventing
@@ -297,6 +387,10 @@ static DWORD WINAPI scan_thread(LPVOID /*param*/) {
         params.quiet          = true;
         params.json_lvl       = pesieve::JSON_DETAILS2;   // full patch detail
         params.results_filter = pesieve::SHOW_SUSPICIOUS; // only suspicious in JSON
+        // SHELLC_PATTERNS_OR_STATS enables the working-set walker so PE-Sieve
+        // visits private executable regions and can detect shellcode patterns /
+        // high-entropy payloads beyond what the PEB module scan covers.
+        params.shellcode      = pesieve::SHELLC_PATTERNS_OR_STATS;
         params.modules_ignored.buffer = ignored_buf;
         params.modules_ignored.length = (ULONG)strlen(ignored_buf);
 
@@ -317,9 +411,18 @@ static DWORD WINAPI scan_thread(LPVOID /*param*/) {
                 json_buf.data(), buf_capacity, &needed);
         }
 
-        // ── Layer 2: translate report to findings with precise whitelist ──────
+        // ── Layer 2: translate PE-Sieve report to findings ────────────────────
+        // ── Layer 3: VirtualQuery walk for private RWX regions ────────────────
+        //
+        // Both layers write through the same pipe handle.  Open the connection
+        // once for the whole reporting block so we hold the pipe across both
+        // passes without reconnecting between individual findings.
         HANDLE pipe = connect_to_pipe();
-        if (pipe != INVALID_HANDLE_VALUE) {
+        if (pipe == INVALID_HANDLE_VALUE) {
+            printf("[DEBUG] DLL: pipe unavailable — findings NOT sent this cycle\n");
+            fflush(stdout);
+        } else {
+            // PE-Sieve aggregate findings (no specific region address).
             if (report.replaced > 0)
                 emit_finding(pipe, self_pid, process_name, session_id, scan_id,
                              FINDING_PE_HOLLOWING, "PE hollowing detected");
@@ -342,6 +445,13 @@ static DWORD WINAPI scan_thread(LPVOID /*param*/) {
             if (report.iat_hooked > 0)
                 emit_finding(pipe, self_pid, process_name, session_id, scan_id,
                              FINDING_MODULE_STOMP, "IAT hook detected");
+
+            // Private RWX region scan — the authoritative path for
+            // FINDING_PRIVATE_EXECUTABLE.  Runs regardless of PE-Sieve counters
+            // because PE-Sieve 0.4.1 does not reliably count low-entropy or
+            // minimally-structured private RWX allocations in its aggregate
+            // report fields.
+            walk_private_rwx(pipe, self_pid, process_name, session_id, scan_id);
 
             CloseHandle(pipe);
         }

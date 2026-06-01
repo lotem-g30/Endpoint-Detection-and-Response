@@ -54,6 +54,12 @@ static DWORD WINAPI pesieve_reader_thread(LPVOID param) {
         BOOL ok = ReadFile(pipe, read_buf, sizeof(read_buf) - 1, &bytes_read, NULL);
         if (!ok || bytes_read == 0) break;
 
+        // Debug: show raw bytes as received, before any accumulation/parsing.
+        read_buf[bytes_read] = '\0';
+        printf("[PESIEVE-SERVER] DEBUG: ReadFile got %lu bytes: %.300s\n",
+               (unsigned long)bytes_read, read_buf);
+        fflush(stdout);
+
         if (accum_pos + (int)bytes_read >= (int)sizeof(accum)) {
             accum_pos = 0;
             continue;
