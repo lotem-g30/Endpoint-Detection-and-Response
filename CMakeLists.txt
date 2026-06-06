@@ -48,8 +48,6 @@ if(EXISTS "${CMAKE_SOURCE_DIR}/Malware/HookChallengeSolution/detoursx64.lib")
     endif()
 else()
     # Try to find Detours via vcpkg
-    # find_package(Detours CONFIG REQUIRED)
-    # Find Detours headers and library (vcpkg style)
     find_path(DETOURS_INCLUDE_DIRS "detours/detours.h")
     find_library(DETOURS_LIBRARY detours REQUIRED)
     include_directories(${DETOURS_INCLUDE_DIRS})
@@ -85,22 +83,26 @@ target_link_libraries(argus_agent PRIVATE
 )
 
 # Optional: Add YARA support if available
-# Uncomment when YARA is installed via vcpkg
 if(TARGET unofficial::libyara::libyara)
     target_compile_definitions(argus_agent PRIVATE YARA_AVAILABLE)
     target_link_libraries(argus_agent PRIVATE unofficial::libyara::libyara)
 endif()
 
 # ============================================================================
-# injector - Classic DLL injector (Section 1.3)
+# injector - Classic DLL injector
 # ============================================================================
 add_executable(injector src/injector/main.c)
 
 # ============================================================================
-# test_target - End-to-end test harness (Section 6.3)
+# test_target - End-to-end test harness (Trinity / EICAR)
 # ============================================================================
 add_executable(test_target src/test_target/main.c)
 target_include_directories(test_target PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
+# ============================================================================
+# shellcode_runner - Metasploit calc.exe shellcode loader for Part 2 E2E test
+# ============================================================================
+add_executable(shellcode_runner src/shellcode_runner/main.c)
 
 # ============================================================================
 # dummy_malware - Synthetic RWX shellcode target for PE-Sieve E2E tests
@@ -108,7 +110,7 @@ target_include_directories(test_target PRIVATE ${CMAKE_SOURCE_DIR}/include)
 add_executable(dummy_malware src/agent/dummy_malware.c)
 
 # ============================================================================
-# test_eq - EventQueue unit test (Section 6.5)
+# test_eq - EventQueue unit test
 # ============================================================================
 add_executable(test_eq
     exercises/test_eq_standalone.c
@@ -119,28 +121,16 @@ target_include_directories(test_eq PRIVATE
     ${CMAKE_SOURCE_DIR}/include
 )
 
-# ============================================================================
-# test_pesieve_correlator - Integration test for correlator_feed_pesieve()
-# ============================================================================
-add_executable(test_pesieve_correlator
-    exercises/test_pesieve_correlator.c
-    src/agent/correlator.c
-)
-target_include_directories(test_pesieve_correlator PRIVATE
-    ${CMAKE_SOURCE_DIR}/src/agent
-    ${CMAKE_SOURCE_DIR}/include
-)
-
 # Set output directories (all binaries go to build/bin/<config>/)
 set_target_properties(argus_hook argus_agent injector test_target test_eq
-                      test_pesieve_correlator dummy_malware PROPERTIES
+                      dummy_malware shellcode_runner PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib
     ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib
 )
 
 # Installation rules
-install(TARGETS argus_hook argus_agent test_target
+install(TARGETS argus_hook argus_agent test_target shellcode_runner
     RUNTIME DESTINATION bin
     LIBRARY DESTINATION lib
     ARCHIVE DESTINATION lib
@@ -164,10 +154,20 @@ target_include_directories(argus_pesieve PRIVATE
     ${CMAKE_SOURCE_DIR}/pe-sieve/include
 )
 
+target_compile_definitions(argus_pesieve PRIVATE PESIEVE_STATIC_LIB)
+
 target_link_libraries(argus_pesieve PRIVATE
     ${CMAKE_SOURCE_DIR}/pe-sieve/build/Debug/pe-sieve.lib
+    ${CMAKE_SOURCE_DIR}/pe-sieve/build/libpeconv/libpeconv/Debug/libpeconv.lib
+    ${CMAKE_SOURCE_DIR}/pe-sieve/build/sig_finder/sig_finder/Debug/sig_finder.lib
+    ${CMAKE_SOURCE_DIR}/pe-sieve/build/paramkit_standalone/Debug/paramkit.lib
     cjson
     rpcrt4
+    psapi
+    ntdll
+    shlwapi
+    imagehlp
+    dbghelp
 )
 
 set_target_properties(argus_pesieve PROPERTIES
@@ -177,8 +177,7 @@ set_target_properties(argus_pesieve PROPERTIES
 )
 
 # ============================================================================
-# Copy the rules/ directory (YARA rules + PE-Sieve pattern file) next to the
-# agent and DLL after every build so both can resolve rules at runtime.
+# Copy the rules/ directory next to the agent after every build
 # ============================================================================
 add_custom_command(TARGET argus_agent POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory

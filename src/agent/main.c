@@ -84,10 +84,9 @@ int main(void) {
     char* last_sep = strrchr(exe_path, '\\');
     if (last_sep) {
         *last_sep = '\0';
-        snprintf(rules_path, sizeof(rules_path),
-                 "%s\\rules\\Multi_EICAR.yar", exe_path);
+        snprintf(rules_path, sizeof(rules_path), "%s\\rules", exe_path);
     } else {
-        strncpy(rules_path, "rules\\Multi_EICAR.yar", sizeof(rules_path) - 1);
+        strncpy(rules_path, "rules", sizeof(rules_path) - 1);
     }
     if (yara_load_rules(rules_path, &rules) == 0) {
         opts.yara_rules = rules;

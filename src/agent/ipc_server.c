@@ -6,7 +6,9 @@
 
 // APIs that additionally trigger a full memory + YARA scan of the target.
 static const char* TRIGGER_APIS[] = {
+    "VirtualAlloc",
     "VirtualAllocEx",
+    "CreateThread",
     "CreateRemoteThread",
     "WriteProcessMemory",
     "VirtualProtect",

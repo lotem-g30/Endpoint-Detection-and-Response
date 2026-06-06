@@ -181,7 +181,8 @@ void correlator_feed_hook_event(DWORD pid, const char* api_name,
         // are tracked; CreateRemoteThread has no meaningful base_address.
         bool track =
             address != 0 && size != 0 &&
-            (strcmp(api_name, "VirtualAllocEx")    == 0 ||
+            (strcmp(api_name, "VirtualAlloc")       == 0 ||
+             strcmp(api_name, "VirtualAllocEx")     == 0 ||
              strcmp(api_name, "WriteProcessMemory") == 0 ||
              strcmp(api_name, "VirtualProtect")     == 0);
 
@@ -216,7 +217,8 @@ void correlator_feed_hook_event(DWORD pid, const char* api_name,
                    strcmp(api_name, "VirtualProtectEx") == 0) {
             if (is_exec)
                 e->has_protected = true;
-        } else if (strcmp(api_name, "CreateRemoteThread") == 0) {
+        } else if (strcmp(api_name, "CreateRemoteThread") == 0 ||
+                   strcmp(api_name, "CreateThread")       == 0) {
             e->has_remote_thread = true;
         }
 
