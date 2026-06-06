@@ -118,7 +118,7 @@ int main(void)
     CloseHandle(hThread);
 
     printf("\n");
-    printf("[runner] Done. Check ArgusAgent output for:\n");
+    printf("[runn2er] Done. Check ArgusAgent output for:\n");
     printf("           hook event: VirtualAlloc protect=64 (RWX)\n");
     printf("           FINDING_PRIVATE_EXECUTABLE\n");
     printf("           hook event: CreateThread\n");
@@ -126,6 +126,7 @@ int main(void)
     printf("\n");
     printf("[runner] Press ENTER to free memory and exit.\n");
     getchar();
+
 
     VirtualFree(lpShellcode, 0, MEM_RELEASE);
     printf("[runner] Cleaned up. Goodbye.\n");
